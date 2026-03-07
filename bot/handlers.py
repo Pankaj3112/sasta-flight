@@ -265,7 +265,10 @@ async def _scan_and_send(context: ContextTypes.DEFAULT_TYPE, route: dict, is_ret
     from_code = route["from_airport"]
     to_code = route["to_airport"]
 
-    result = await scan_route(from_code, to_code)
+    # Resolve stops preference
+    max_stops = await db.get_route_stops_preference(route["id"])
+
+    result = await scan_route(from_code, to_code, max_stops=max_stops)
 
     if result is None:
         if is_retry:
@@ -303,7 +306,8 @@ async def _scan_and_send(context: ContextTypes.DEFAULT_TYPE, route: dict, is_ret
         price_data=json.dumps(result.top_days),
     )
 
-    msg = format_daily_message(result, prev_cheapest=prev_cheapest)
+    stops_label = STOPS_LABELS.get(max_stops) if max_stops != "any" else None
+    msg = format_daily_message(result, prev_cheapest=prev_cheapest, stops_label=stops_label)
     await context.bot.send_message(chat_id=CHAT_ID, text=msg)
 
 
