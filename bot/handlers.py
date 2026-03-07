@@ -51,6 +51,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/add <from> <to> - Add a route (e.g. /add ATQ BOM)\n"
         "/remove <id> - Remove a route\n"
         "/routes - List active routes\n"
+        "/stops - Set default stops preference\n"
         "/check - Scan all routes now\n"
         "/time <HH:MM> - Set daily scan time (24h, IST)\n"
         "/history - 7-day price trend\n"
