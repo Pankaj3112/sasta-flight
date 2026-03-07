@@ -71,7 +71,7 @@ def main():
     application.add_handler(CommandHandler("pause", handlers.pause_command))
     application.add_handler(CommandHandler("resume", handlers.resume_command))
     application.add_handler(CommandHandler("stops", handlers.stops_command))
-    application.add_handler(CallbackQueryHandler(handlers.stops_callback))
+    application.add_handler(CallbackQueryHandler(handlers.stops_callback, pattern=r"^stops_"))
 
     application.run_polling()
 

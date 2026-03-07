@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes
 
 from bot.config import CHAT_ID
 from bot.db import Database
-from bot.scanner import scan_route
+from bot.scanner import scan_route, NO_MATCHES
 from bot.formatter import (
     format_daily_message,
     format_error_message,
@@ -25,9 +25,6 @@ STOPS_LABELS = {
     "1stop": "Up to 1 Stop",
     "2stops": "Up to 2 Stops",
 }
-
-STOPS_OPTIONS = list(STOPS_LABELS.keys())
-
 
 def _stops_keyboard(callback_prefix: str, current: str | None = None) -> InlineKeyboardMarkup:
     """Build inline keyboard for stops selection."""
@@ -218,19 +215,28 @@ async def stops_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stops_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard callbacks for stops preference."""
+    if not _is_authorized(update):
+        return
     query = update.callback_query
     await query.answer()
 
     data = query.data
     if data.startswith("stops_global:"):
         value = data.split(":")[1]
+        if value not in STOPS_LABELS:
+            return
         await db.set_config("stops_preference", value)
         await query.edit_message_text(f"✅ Default stops preference set to: {STOPS_LABELS[value]}")
 
     elif data.startswith("stops_route:"):
         parts = data.split(":")
-        route_id = int(parts[1])
-        value = parts[2]
+        try:
+            route_id = int(parts[1])
+        except (ValueError, IndexError):
+            return
+        value = parts[2] if len(parts) > 2 else None
+        if value not in STOPS_LABELS:
+            return
         await db.set_route_stops(route_id, value)
         routes = await db.get_active_routes()
         route = next((r for r in routes if r["id"] == route_id), None)
@@ -243,13 +249,21 @@ async def stops_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("stops_newroute:"):
         parts = data.split(":")
-        route_id = int(parts[1])
-        value = parts[2]
+        try:
+            route_id = int(parts[1])
+        except (ValueError, IndexError):
+            return
+        value = parts[2] if len(parts) > 2 else None
+        if value not in STOPS_LABELS:
+            return
         await db.set_route_stops(route_id, value)
         await query.edit_message_text(f"✅ Stops preference set to: {STOPS_LABELS[value]}")
 
     elif data.startswith("stops_pick:"):
-        route_id = int(data.split(":")[1])
+        try:
+            route_id = int(data.split(":")[1])
+        except (ValueError, IndexError):
+            return
         routes = await db.get_active_routes()
         route = next((r for r in routes if r["id"] == route_id), None)
         if route:
@@ -270,6 +284,16 @@ async def _scan_and_send(context: ContextTypes.DEFAULT_TYPE, route: dict, is_ret
     max_stops = await db.get_route_stops_preference(route["id"])
 
     result = await scan_route(from_code, to_code, max_stops=max_stops)
+
+    if result is NO_MATCHES:
+        stops_label = STOPS_LABELS.get(max_stops, max_stops)
+        msg = (
+            f"✈️ {from_code} → {to_code}\n"
+            f"No flights found matching filter: {stops_label}\n"
+            "Try a less restrictive stops preference via /stops or /routes."
+        )
+        await context.bot.send_message(chat_id=CHAT_ID, text=msg)
+        return
 
     if result is None:
         if is_retry:

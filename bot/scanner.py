@@ -19,6 +19,10 @@ from bot.config import DAYS_TO_SCAN, TOP_CHEAPEST
 
 logger = logging.getLogger(__name__)
 
+# Sentinel: scan found dates but no flights matched the stops filter.
+# Distinct from None (which means the scan itself failed).
+NO_MATCHES = "NO_MATCHES"
+
 STOPS_MAP = {
     "any": MaxStops.ANY,
     "direct": MaxStops.NON_STOP,
@@ -154,7 +158,7 @@ async def scan_route(from_code: str, to_code: str, max_stops: str = "any") -> Sc
 
     if not top_days:
         logger.warning(f"No flights matching stops preference for {from_code} -> {to_code}")
-        return None
+        return NO_MATCHES
 
     return ScanResult(
         from_airport=from_code.upper(),
