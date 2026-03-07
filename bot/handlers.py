@@ -117,10 +117,22 @@ async def routes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No active routes. Use /add to add one.")
         return
 
+    global_pref = await db.get_config("stops_preference") or "any"
     lines = ["📋 Active Routes:\n"]
+    keyboard_rows = []
     for r in routes:
-        lines.append(f"  {r['id']}. {r['from_airport']} → {r['to_airport']}")
-    await update.message.reply_text("\n".join(lines))
+        effective = r["max_stops"] or global_pref
+        label = STOPS_LABELS.get(effective, effective)
+        lines.append(f"  {r['id']}. {r['from_airport']} → {r['to_airport']} ({label})")
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                f"Change Stops: {r['from_airport']} → {r['to_airport']}",
+                callback_data=f"stops_pick:{r['id']}",
+            )
+        ])
+
+    markup = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+    await update.message.reply_text("\n".join(lines), reply_markup=markup)
 
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
