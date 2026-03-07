@@ -2,7 +2,7 @@ import json
 import logging
 from datetime import datetime
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from bot.config import CHAT_ID
@@ -18,6 +18,24 @@ logger = logging.getLogger(__name__)
 
 # Global db reference, set in main.py
 db: Database = None
+
+STOPS_LABELS = {
+    "any": "Any",
+    "direct": "Direct",
+    "1stop": "Up to 1 Stop",
+    "2stops": "Up to 2 Stops",
+}
+
+STOPS_OPTIONS = list(STOPS_LABELS.keys())
+
+
+def _stops_keyboard(callback_prefix: str, current: str | None = None) -> InlineKeyboardMarkup:
+    """Build inline keyboard for stops selection."""
+    buttons = []
+    for value, label in STOPS_LABELS.items():
+        display = f">> {label} <<" if value == current else label
+        buttons.append(InlineKeyboardButton(display, callback_data=f"{callback_prefix}:{value}"))
+    return InlineKeyboardMarkup([buttons])
 
 
 def _is_authorized(update: Update) -> bool:
@@ -169,6 +187,63 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await db.set_config("is_paused", "0")
     await update.message.reply_text("▶️ Daily updates resumed.")
+
+
+async def stops_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    current = await db.get_config("stops_preference") or "any"
+    keyboard = _stops_keyboard("stops_global", current)
+    await update.message.reply_text(
+        f"Current default stops preference: {STOPS_LABELS.get(current, current)}\n"
+        "Select new default:",
+        reply_markup=keyboard,
+    )
+
+
+async def stops_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard callbacks for stops preference."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if data.startswith("stops_global:"):
+        value = data.split(":")[1]
+        await db.set_config("stops_preference", value)
+        await query.edit_message_text(f"✅ Default stops preference set to: {STOPS_LABELS[value]}")
+
+    elif data.startswith("stops_route:"):
+        parts = data.split(":")
+        route_id = int(parts[1])
+        value = parts[2]
+        await db.set_route_stops(route_id, value)
+        routes = await db.get_active_routes()
+        route = next((r for r in routes if r["id"] == route_id), None)
+        if route:
+            await query.edit_message_text(
+                f"✅ {route['from_airport']} → {route['to_airport']} stops set to: {STOPS_LABELS[value]}"
+            )
+        else:
+            await query.edit_message_text(f"✅ Route stops preference updated to: {STOPS_LABELS[value]}")
+
+    elif data.startswith("stops_newroute:"):
+        parts = data.split(":")
+        route_id = int(parts[1])
+        value = parts[2]
+        await db.set_route_stops(route_id, value)
+        await query.edit_message_text(f"✅ Stops preference set to: {STOPS_LABELS[value]}")
+
+    elif data.startswith("stops_pick:"):
+        route_id = int(data.split(":")[1])
+        routes = await db.get_active_routes()
+        route = next((r for r in routes if r["id"] == route_id), None)
+        if route:
+            current = route["max_stops"]
+            keyboard = _stops_keyboard(f"stops_route:{route_id}", current)
+            await query.edit_message_text(
+                f"Select stops preference for {route['from_airport']} → {route['to_airport']}:",
+                reply_markup=keyboard,
+            )
 
 
 async def _scan_and_send(context: ContextTypes.DEFAULT_TYPE, route: dict, is_retry: bool = False):
