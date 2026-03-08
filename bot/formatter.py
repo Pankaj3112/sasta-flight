@@ -87,7 +87,7 @@ def _flight_url(from_airport: str, to_airport: str, date: str, max_stops: str = 
     return f"https://www.google.com/travel/flights/search?tfs={tfs}"
 
 
-def format_daily_message(result: ScanResult, prev_cheapest: float | None = None, stops_label: str | None = None) -> str:
+def format_daily_message(result: ScanResult, prev_cheapest: float | None = None, stops_label: str | None = None, max_stops: str = "any") -> str:
     header = f"✈️ {result.from_airport} → {result.to_airport} | Next 30 Days"
     if stops_label:
         header += f" | Filter: {stops_label}"
@@ -116,7 +116,8 @@ def format_daily_message(result: ScanResult, prev_cheapest: float | None = None,
     # Top cheapest days
     lines.append(f"📊 Top {len(result.top_days)} Cheapest Days:")
     for i, day in enumerate(result.top_days, 1):
-        lines.append(f" {i}. {_format_date(day['date'])} - {_format_price(day['price'])}")
+        url = _flight_url(result.from_airport, result.to_airport, day["date"], max_stops=max_stops)
+        lines.append(f" {i}. {_format_date(day['date'])} - {_format_price(day['price'])}  [Book →]({url})")
 
     lines.append("")
 
