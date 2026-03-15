@@ -129,3 +129,16 @@ async def test_get_route_stops_preference_custom_global(db):
     await db.set_config("stops_preference", "1stop")
     pref = await db.get_route_stops_preference(route_id)
     assert pref == "1stop"
+
+
+@pytest.mark.asyncio
+async def test_init_creates_scan_interval_config(db):
+    config = await db.get_config("scan_interval")
+    assert config == "1440"
+
+
+@pytest.mark.asyncio
+async def test_routes_have_scan_interval_column(db):
+    route_id = await db.add_route("ATQ", "BOM")
+    routes = await db.get_active_routes()
+    assert routes[0]["scan_interval"] is None

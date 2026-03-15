@@ -45,6 +45,7 @@ class Database:
             INSERT OR IGNORE INTO config (key, value) VALUES ('notify_time', '08:00');
             INSERT OR IGNORE INTO config (key, value) VALUES ('is_paused', '0');
             INSERT OR IGNORE INTO config (key, value) VALUES ('stops_preference', 'any');
+            INSERT OR IGNORE INTO config (key, value) VALUES ('scan_interval', '1440');
             """
         )
         await self.db.commit()
@@ -52,6 +53,13 @@ class Database:
         # Migrate: add max_stops column if missing
         try:
             await self.db.execute("ALTER TABLE routes ADD COLUMN max_stops TEXT DEFAULT NULL")
+            await self.db.commit()
+        except Exception:
+            pass  # Column already exists
+
+        # Migrate: add scan_interval column if missing
+        try:
+            await self.db.execute("ALTER TABLE routes ADD COLUMN scan_interval TEXT DEFAULT NULL")
             await self.db.commit()
         except Exception:
             pass  # Column already exists
@@ -84,7 +92,7 @@ class Database:
 
     async def get_active_routes(self) -> list[dict]:
         cursor = await self.db.execute(
-            "SELECT id, from_airport, to_airport, max_stops FROM routes WHERE is_active = 1"
+            "SELECT id, from_airport, to_airport, max_stops, scan_interval FROM routes WHERE is_active = 1"
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
