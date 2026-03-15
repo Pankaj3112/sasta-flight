@@ -5,13 +5,14 @@ from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from bot.config import CHAT_ID
+from bot.config import CHAT_ID, INTERVAL_OPTIONS
 from bot.db import Database
 from bot.scanner import scan_route, NO_MATCHES
 from bot.formatter import (
     format_daily_message,
     format_error_message,
     format_history_message,
+    format_retry_failed_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,18 @@ STOPS_LABELS = {
     "1stop": "Up to 1 Stop",
     "2stops": "Up to 2 Stops",
 }
+
+INTERVAL_LABELS = {str(v): k for k, v in INTERVAL_OPTIONS.items()}  # {"60": "1h", ...}
+
+
+def _frequency_keyboard(callback_prefix: str, current_minutes: str | None = None) -> InlineKeyboardMarkup:
+    """Build inline keyboard for frequency selection."""
+    buttons = []
+    for label, minutes in INTERVAL_OPTIONS.items():
+        display = f">> {label} <<" if str(minutes) == current_minutes else label
+        buttons.append(InlineKeyboardButton(display, callback_data=f"{callback_prefix}:{minutes}"))
+    return InlineKeyboardMarkup([buttons[:3], buttons[3:]])
+
 
 def _stops_keyboard(callback_prefix: str, current: str | None = None) -> InlineKeyboardMarkup:
     """Build inline keyboard for stops selection."""
@@ -43,17 +56,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
     await update.message.reply_text(
-        "✈️ SastaFlight - Daily Flight Price Scanner\n\n"
+        "✈️ SastaFlight - Flight Price Scanner\n\n"
         "Commands:\n"
         "/add <from> <to> - Add a route (e.g. /add ATQ BOM)\n"
         "/remove <id> - Remove a route\n"
         "/routes - List active routes\n"
         "/stops - Set default stops preference\n"
+        "/frequency - Set scan frequency\n"
         "/check - Scan all routes now\n"
-        "/time <HH:MM> - Set daily scan time (24h, IST)\n"
+        "/time <HH:MM> - Set scan start time (24h, IST)\n"
         "/history - 7-day price trend\n"
-        "/pause - Pause daily updates\n"
-        "/resume - Resume daily updates\n"
+        "/pause - Pause scheduled scans\n"
+        "/resume - Resume scheduled scans\n"
         "/help - Show this message"
     )
 
@@ -79,6 +93,9 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     route_id = await db.add_route(from_code, to_code)
+    # Schedule a scan job for the new route
+    from bot.main import schedule_scan_jobs
+    await schedule_scan_jobs(context.application)
     keyboard = _stops_keyboard(f"stops_newroute:{route_id}")
     await update.message.reply_text(
         f"✅ Route added: {from_code} → {to_code} (ID: {route_id})\n"
@@ -102,6 +119,10 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     removed = await db.remove_route(route_id)
     if removed:
+        # Cancel the scheduled scan job for this route
+        from bot.main import SCAN_JOB_PREFIX
+        for job in context.job_queue.get_jobs_by_name(f"{SCAN_JOB_PREFIX}{route_id}"):
+            job.schedule_removal()
         await update.message.reply_text(f"✅ Route {route_id} removed.")
     else:
         await update.message.reply_text(f"❌ Route {route_id} not found.")
@@ -116,16 +137,25 @@ async def routes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     global_pref = await db.get_config("stops_preference") or "any"
+    global_interval = await db.get_config("scan_interval") or "1440"
     lines = ["📋 Active Routes:\n"]
     keyboard_rows = []
     for r in routes:
-        effective = r["max_stops"] or global_pref
-        label = STOPS_LABELS.get(effective, effective)
-        lines.append(f"  {r['id']}. {r['from_airport']} → {r['to_airport']} ({label})")
+        effective_stops = r["max_stops"] or global_pref
+        stops_label = STOPS_LABELS.get(effective_stops, effective_stops)
+        effective_interval = r["scan_interval"] or global_interval
+        freq_label = INTERVAL_LABELS.get(effective_interval, f"{effective_interval}m")
+        lines.append(f"  {r['id']}. {r['from_airport']} → {r['to_airport']} | {stops_label} | Every {freq_label}")
         keyboard_rows.append([
             InlineKeyboardButton(
                 f"Change Stops: {r['from_airport']} → {r['to_airport']}",
                 callback_data=f"stops_pick:{r['id']}",
+            )
+        ])
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                f"Change Frequency: {r['from_airport']} → {r['to_airport']}",
+                callback_data=f"freq_pick:{r['id']}",
             )
         ])
 
@@ -153,7 +183,7 @@ async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or len(context.args) != 1:
         current = await db.get_config("notify_time")
         await update.message.reply_text(
-            f"Current scan time: {current} IST\nUsage: /time <HH:MM>"
+            f"Current scan start time: {current} IST\nUsage: /time <HH:MM>"
         )
         return
 
@@ -167,10 +197,10 @@ async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db.set_config("notify_time", time_str)
 
     # Reschedule - import here to avoid circular
-    from bot.main import schedule_daily_job
-    await schedule_daily_job(context.application)
+    from bot.main import schedule_scan_jobs
+    await schedule_scan_jobs(context.application)
 
-    await update.message.reply_text(f"✅ Daily scan time set to {time_str} IST")
+    await update.message.reply_text(f"✅ Scan start time set to {time_str} IST")
 
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -209,6 +239,19 @@ async def stops_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Current default stops preference: {STOPS_LABELS.get(current, current)}\n"
         "Select new default:",
+        reply_markup=keyboard,
+    )
+
+
+async def frequency_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    current = await db.get_config("scan_interval") or "1440"
+    label = INTERVAL_LABELS.get(current, f"{current}m")
+    keyboard = _frequency_keyboard("freq_global", current)
+    await update.message.reply_text(
+        f"Current scan frequency: every {label}\n"
+        "Select new frequency:",
         reply_markup=keyboard,
     )
 
@@ -275,6 +318,66 @@ async def stops_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
+async def frequency_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard callbacks for frequency."""
+    if not _is_authorized(update):
+        return
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if data.startswith("freq_global:"):
+        value = data.split(":")[1]
+        if value not in INTERVAL_LABELS:
+            return
+        await db.set_config("scan_interval", value)
+
+        from bot.main import schedule_scan_jobs
+        await schedule_scan_jobs(context.application)
+
+        label = INTERVAL_LABELS[value]
+        await query.edit_message_text(f"✅ Scan frequency set to every {label} for all routes.")
+
+    elif data.startswith("freq_pick:"):
+        try:
+            route_id = int(data.split(":")[1])
+        except (ValueError, IndexError):
+            return
+        routes = await db.get_active_routes()
+        route = next((r for r in routes if r["id"] == route_id), None)
+        if route:
+            current = route.get("scan_interval")
+            keyboard = _frequency_keyboard(f"freq_route:{route_id}", current)
+            await query.edit_message_text(
+                f"Select scan frequency for {route['from_airport']} → {route['to_airport']}:",
+                reply_markup=keyboard,
+            )
+
+    elif data.startswith("freq_route:"):
+        parts = data.split(":")
+        try:
+            route_id = int(parts[1])
+        except (ValueError, IndexError):
+            return
+        value = parts[2] if len(parts) > 2 else None
+        if value not in INTERVAL_LABELS:
+            return
+        await db.set_route_scan_interval(route_id, value)
+
+        from bot.main import schedule_scan_jobs
+        await schedule_scan_jobs(context.application)
+
+        routes = await db.get_active_routes()
+        route = next((r for r in routes if r["id"] == route_id), None)
+        label = INTERVAL_LABELS[value]
+        if route:
+            await query.edit_message_text(
+                f"✅ Scan frequency for {route['from_airport']} → {route['to_airport']} set to every {label}."
+            )
+        else:
+            await query.edit_message_text(f"✅ Route scan frequency set to every {label}.")
+
+
 async def _scan_and_send(context: ContextTypes.DEFAULT_TYPE, route: dict, is_retry: bool = False):
     """Scan a single route and send the result. Schedule retry on failure."""
     from_code = route["from_airport"]
@@ -297,22 +400,27 @@ async def _scan_and_send(context: ContextTypes.DEFAULT_TYPE, route: dict, is_ret
 
     if result is None:
         if is_retry:
-            msg = (
-                f"❌ {from_code} → {to_code}\n"
-                "Scan failed after retry. Will try again tomorrow.\n"
-                "Run /check to try manually."
-            )
+            msg = format_retry_failed_message(from_code, to_code)
             await context.bot.send_message(chat_id=CHAT_ID, text=msg)
         else:
-            msg = format_error_message(from_code, to_code)
-            await context.bot.send_message(chat_id=CHAT_ID, text=msg)
-            # Schedule retry in 4 hours
-            context.job_queue.run_once(
-                _retry_scan_job,
-                when=4 * 60 * 60,
-                data=route,
-                name=f"retry_{route['id']}",
-            )
+            # Schedule retry only if interval > 4 hours
+            interval = await db.get_route_scan_interval(route["id"])
+            if interval > 240:
+                msg = format_error_message(from_code, to_code)
+                await context.bot.send_message(chat_id=CHAT_ID, text=msg)
+                context.job_queue.run_once(
+                    _retry_scan_job,
+                    when=4 * 60 * 60,
+                    data=route,
+                    name=f"retry_{route['id']}",
+                )
+            else:
+                msg = (
+                    f"⚠️ {from_code} → {to_code}\n"
+                    "Scan failed. Will retry on next scheduled scan.\n"
+                    "Run /check to try manually."
+                )
+                await context.bot.send_message(chat_id=CHAT_ID, text=msg)
         return
 
     # Get previous cheapest for trend
@@ -342,15 +450,21 @@ async def _retry_scan_job(context: ContextTypes.DEFAULT_TYPE):
     await _scan_and_send(context, route, is_retry=True)
 
 
-async def daily_scan_job(context: ContextTypes.DEFAULT_TYPE):
-    """Daily scheduled job: scan all routes if not paused."""
+async def _scheduled_scan_route(context: ContextTypes.DEFAULT_TYPE):
+    """Repeating job callback for a single route."""
     is_paused = await db.get_config("is_paused")
     if is_paused == "1":
         return
 
-    routes = await db.get_active_routes()
-    if not routes:
+    route = context.job.data
+    if not route:
         return
 
-    for route in routes:
+    scanning = context.bot_data.setdefault("_scanning_routes", set())
+    if route["id"] in scanning:
+        return
+    scanning.add(route["id"])
+    try:
         await _scan_and_send(context, route)
+    finally:
+        scanning.discard(route["id"])

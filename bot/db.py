@@ -42,9 +42,13 @@ class Database:
                 FOREIGN KEY (route_id) REFERENCES routes(id)
             );
 
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_route_date
+            ON price_history(route_id, scan_date);
+
             INSERT OR IGNORE INTO config (key, value) VALUES ('notify_time', '08:00');
             INSERT OR IGNORE INTO config (key, value) VALUES ('is_paused', '0');
             INSERT OR IGNORE INTO config (key, value) VALUES ('stops_preference', 'any');
+            INSERT OR IGNORE INTO config (key, value) VALUES ('scan_interval', '1440');
             """
         )
         await self.db.commit()
@@ -52,6 +56,13 @@ class Database:
         # Migrate: add max_stops column if missing
         try:
             await self.db.execute("ALTER TABLE routes ADD COLUMN max_stops TEXT DEFAULT NULL")
+            await self.db.commit()
+        except Exception:
+            pass  # Column already exists
+
+        # Migrate: add scan_interval column if missing
+        try:
+            await self.db.execute("ALTER TABLE routes ADD COLUMN scan_interval TEXT DEFAULT NULL")
             await self.db.commit()
         except Exception:
             pass  # Column already exists
@@ -84,7 +95,7 @@ class Database:
 
     async def get_active_routes(self) -> list[dict]:
         cursor = await self.db.execute(
-            "SELECT id, from_airport, to_airport, max_stops FROM routes WHERE is_active = 1"
+            "SELECT id, from_airport, to_airport, max_stops, scan_interval FROM routes WHERE is_active = 1"
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
@@ -114,6 +125,28 @@ class Database:
             return row["max_stops"]
         return await self.get_config("stops_preference") or "any"
 
+    async def set_route_scan_interval(self, route_id: int, interval: str) -> bool:
+        valid = {"60", "120", "240", "360", "720", "1440"}
+        if interval not in valid:
+            return False
+        cursor = await self.db.execute(
+            "UPDATE routes SET scan_interval = ? WHERE id = ? AND is_active = 1",
+            (interval, route_id),
+        )
+        await self.db.commit()
+        return cursor.rowcount > 0
+
+    async def get_route_scan_interval(self, route_id: int) -> int:
+        """Return effective scan interval in minutes for a route."""
+        cursor = await self.db.execute(
+            "SELECT scan_interval FROM routes WHERE id = ?", (route_id,)
+        )
+        row = await cursor.fetchone()
+        if row and row["scan_interval"]:
+            return int(row["scan_interval"])
+        global_interval = await self.get_config("scan_interval")
+        return int(global_interval) if global_interval else 1440
+
     async def save_price_history(
         self,
         route_id: int,
@@ -125,7 +158,7 @@ class Database:
         price_data: str | None,
     ):
         await self.db.execute(
-            """INSERT INTO price_history
+            """INSERT OR REPLACE INTO price_history
             (route_id, scan_date, cheapest_travel_date, cheapest_price, cheapest_airline, avg_price, price_data)
             VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (route_id, scan_date, cheapest_travel_date, cheapest_price, cheapest_airline, avg_price, price_data),
