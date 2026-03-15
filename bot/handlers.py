@@ -5,7 +5,7 @@ from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from bot.config import CHAT_ID
+from bot.config import CHAT_ID, INTERVAL_OPTIONS
 from bot.db import Database
 from bot.scanner import scan_route, NO_MATCHES
 from bot.formatter import (
@@ -25,6 +25,18 @@ STOPS_LABELS = {
     "1stop": "Up to 1 Stop",
     "2stops": "Up to 2 Stops",
 }
+
+INTERVAL_LABELS = {str(v): k for k, v in INTERVAL_OPTIONS.items()}  # {"60": "1h", ...}
+
+
+def _frequency_keyboard(callback_prefix: str, current_minutes: str | None = None) -> InlineKeyboardMarkup:
+    """Build inline keyboard for frequency selection."""
+    buttons = []
+    for label, minutes in INTERVAL_OPTIONS.items():
+        display = f">> {label} <<" if str(minutes) == current_minutes else label
+        buttons.append(InlineKeyboardButton(display, callback_data=f"{callback_prefix}:{minutes}"))
+    return InlineKeyboardMarkup([buttons[:3], buttons[3:]])
+
 
 def _stops_keyboard(callback_prefix: str, current: str | None = None) -> InlineKeyboardMarkup:
     """Build inline keyboard for stops selection."""
@@ -216,6 +228,19 @@ async def stops_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def frequency_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    current = await db.get_config("scan_interval") or "1440"
+    label = INTERVAL_LABELS.get(current, f"{current}m")
+    keyboard = _frequency_keyboard("freq_global", current)
+    await update.message.reply_text(
+        f"Current scan frequency: every {label}\n"
+        "Select new frequency:",
+        reply_markup=keyboard,
+    )
+
+
 async def stops_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard callbacks for stops preference."""
     if not _is_authorized(update):
@@ -276,6 +301,66 @@ async def stops_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Select stops preference for {route['from_airport']} → {route['to_airport']}:",
                 reply_markup=keyboard,
             )
+
+
+async def frequency_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard callbacks for frequency."""
+    if not _is_authorized(update):
+        return
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if data.startswith("freq_global:"):
+        value = data.split(":")[1]
+        if value not in INTERVAL_LABELS:
+            return
+        await db.set_config("scan_interval", value)
+
+        from bot.main import schedule_scan_jobs
+        await schedule_scan_jobs(context.application)
+
+        label = INTERVAL_LABELS[value]
+        await query.edit_message_text(f"✅ Scan frequency set to every {label} for all routes.")
+
+    elif data.startswith("freq_pick:"):
+        try:
+            route_id = int(data.split(":")[1])
+        except (ValueError, IndexError):
+            return
+        routes = await db.get_active_routes()
+        route = next((r for r in routes if r["id"] == route_id), None)
+        if route:
+            current = route.get("scan_interval")
+            keyboard = _frequency_keyboard(f"freq_route:{route_id}", current)
+            await query.edit_message_text(
+                f"Select scan frequency for {route['from_airport']} → {route['to_airport']}:",
+                reply_markup=keyboard,
+            )
+
+    elif data.startswith("freq_route:"):
+        parts = data.split(":")
+        try:
+            route_id = int(parts[1])
+        except (ValueError, IndexError):
+            return
+        value = parts[2] if len(parts) > 2 else None
+        if value not in INTERVAL_LABELS:
+            return
+        await db.set_route_scan_interval(route_id, value)
+
+        from bot.main import schedule_scan_jobs
+        await schedule_scan_jobs(context.application)
+
+        routes = await db.get_active_routes()
+        route = next((r for r in routes if r["id"] == route_id), None)
+        label = INTERVAL_LABELS[value]
+        if route:
+            await query.edit_message_text(
+                f"✅ Scan frequency for {route['from_airport']} → {route['to_airport']} set to every {label}."
+            )
+        else:
+            await query.edit_message_text(f"✅ Route scan frequency set to every {label}.")
 
 
 async def _scan_and_send(context: ContextTypes.DEFAULT_TYPE, route: dict, is_retry: bool = False):

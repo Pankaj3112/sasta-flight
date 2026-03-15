@@ -95,6 +95,8 @@ def main():
     application.add_handler(CommandHandler("resume", handlers.resume_command))
     application.add_handler(CommandHandler("stops", handlers.stops_command))
     application.add_handler(CallbackQueryHandler(handlers.stops_callback, pattern=r"^stops_"))
+    application.add_handler(CommandHandler("frequency", handlers.frequency_command))
+    application.add_handler(CallbackQueryHandler(handlers.frequency_callback, pattern=r"^freq_"))
 
     application.run_polling()
 
