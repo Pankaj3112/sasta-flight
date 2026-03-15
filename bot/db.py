@@ -122,6 +122,28 @@ class Database:
             return row["max_stops"]
         return await self.get_config("stops_preference") or "any"
 
+    async def set_route_scan_interval(self, route_id: int, interval: str) -> bool:
+        valid = {"60", "120", "240", "360", "720", "1440"}
+        if interval not in valid:
+            return False
+        cursor = await self.db.execute(
+            "UPDATE routes SET scan_interval = ? WHERE id = ? AND is_active = 1",
+            (interval, route_id),
+        )
+        await self.db.commit()
+        return cursor.rowcount > 0
+
+    async def get_route_scan_interval(self, route_id: int) -> int:
+        """Return effective scan interval in minutes for a route."""
+        cursor = await self.db.execute(
+            "SELECT scan_interval FROM routes WHERE id = ?", (route_id,)
+        )
+        row = await cursor.fetchone()
+        if row and row["scan_interval"]:
+            return int(row["scan_interval"])
+        global_interval = await self.get_config("scan_interval")
+        return int(global_interval) if global_interval else 1440
+
     async def save_price_history(
         self,
         route_id: int,
